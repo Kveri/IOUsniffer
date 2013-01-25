@@ -1,3 +1,18 @@
+/*
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -26,27 +41,24 @@ int check_files(int **instances, struct pollfd **sockets)
 		if (entry->d_type != DT_SOCK)
 			continue; // only socket files interest us
 
-		if (strstr(entry->d_name, "_real") != NULL) // ignore real sockets
-			continue;
-
-		printf("file: %s\n", entry->d_name);
+		if (strstr(entry->d_name, "_real") != NULL)
+			continue; // ignore real sockets
 
 		pi = *instances;
 		got_it = 0;
 		len = 0;
-		while (pi && *pi != 0) { // walk instances array, look for current socket
+		while (pi && *pi != 0) {
+			// walk instances array, look for current socket
 			if (*pi == atoi(entry->d_name))
 				got_it = 1;
-
 			pi++;
 			len++;
 		}
 
-		if (got_it == 1) // this socket is already handled
-			continue;
+		if (got_it == 1)
+			continue; // this socket is already handled
 
-		// this socket isn't handled, add it
-		printf("len = %d\n", len);
+		// this socket isn't handled, add it to instance list
 		*instances = (int *)realloc(*instances, sizeof(int) * (len+2));
 		(*instances)[len] = atoi(entry->d_name);
 		(*instances)[len+1] = 0; // end of array marker
@@ -63,12 +75,13 @@ int check_files(int **instances, struct pollfd **sockets)
 		rename(sock_addr.sun_path, path_tmp);
 		bind(sock, (struct sockaddr *)&sock_addr, tmp);
 
-		*sockets = (struct pollfd *)realloc(*sockets, sizeof(struct pollfd) * (len+2));
+		*sockets = (struct pollfd *)realloc(*sockets,
+					sizeof(struct pollfd) * (len+1));
 		(*sockets)[len].fd = sock;
 		(*sockets)[len].events = POLLIN;
-		(*sockets)[len+1].fd = -1;
 	}
 
+	// count instances
 	len = 0;
 	pi = *instances;
 	while (pi && *pi != 0) {
@@ -89,60 +102,52 @@ int main()
 	int i, j, len, nfds, ret, remote_len;
 	int *instances = NULL;
 	struct pollfd *sockets = NULL;
-	short iou_src, iou_dst;
+	short iou_src, iou_dst, iou_src_if1, iou_src_if2,
+		iou_dst_if1, iou_dst_if2;
 
 	while (1) {
-		// zistime zoznam suborov
 		nfds = check_files(&instances, &sockets);
-		for (i = 0; i < nfds; i++) {
-			printf("fd[%d] = %d\n", i, sockets[i].fd);
-		}
 
 		ret = poll(sockets, nfds, -1);
 
-		if (ret == 0)
+		if (ret <= 0)
 			continue;
 
-		printf("returned FDs = %d\n", ret);
-
 		for (i = 0; i < nfds && ret != 0; i++) {
-			if (sockets[i].revents != POLLIN) {
+			if (sockets[i].revents != POLLIN)
 				continue;
-			}
 
 			remote_len = sizeof(remote);
 			len = recvfrom(sockets[i].fd, &buf, sizeof(buf), 0,
 				(struct sockaddr *)&remote, &remote_len);
 
-			printf("received from [%s]:\n", remote.sun_path);
-			for (j = 0; j < len; j++) {
-				printf("%02X ", buf[j] & 0xff);
-			}
-			printf("\n");
 
+			// conversion
 			iou_dst = ntohs(*((short *)&buf[0]));
 			iou_src = ntohs(*((short *)&buf[2]));
-			printf("dst IOU: %d\n", iou_dst);
-			printf("src IOU: %d\n", iou_src);
+			iou_dst_if1 = buf[4] & 0x0f;
+			iou_dst_if2 = (buf[4] & 0xf0) >> 4;
+			iou_src_if1 = buf[5] & 0x0f;
+			iou_src_if2 = (buf[5] & 0xf0) >> 4;
 
+			// build path and send it
 			sprintf(path, "%s/%d_real", SOCKET_DIR, iou_dst);
-			printf("PATH = %s\n", path);
 
 			dst.sun_family = AF_UNIX;
 			strncpy(dst.sun_path, path, sizeof(dst.sun_path)-1);
 			sendto(sockets[i].fd, buf, len, 0,
 				(struct sockaddr *)&dst, sizeof(dst));
-			
+
+			// dump it
+			printf("received from [%s] ", remote.sun_path);
+			printf("%d:%d/%d -> %d:%d/%d:\n", iou_src, iou_src_if1,
+				iou_src_if2, iou_dst, iou_dst_if1, iou_dst_if2);
+			for (j = 0; j < len; j++) {
+				printf("%02X ", buf[j] & 0xff);
+			}
+			printf("\n");
+
 			ret--;
 		}
-
-		continue;
-
-		len = recv(s, &buf, sizeof(buf), 0);
-		printf("received len = %d\n", len);
-		for (i = 0; i < len; i++) {
-			printf("%x ", buf[i] & 0xff);
-		}
-		printf("\n\n");
 	}
 }
