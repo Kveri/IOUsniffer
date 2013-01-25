@@ -1,2 +1,2 @@
 all:
-	gcc -o iousniff iousniff.c
+	gcc -Wall -O0 -g -ggdb -lpcap -o iousniff iousniff.c
