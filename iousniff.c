@@ -28,6 +28,10 @@
 #define SOCKET_DIR "/tmp/netio0"
 #define NETMAP_FILE "/home/kveri/iou_test/NETMAP"
 
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
 struct instances_s {
 	struct iou_s *ious;
 	struct pollfd *sockets;
