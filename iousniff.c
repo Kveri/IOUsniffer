@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -24,6 +25,7 @@
 #include <dirent.h>
 #include <poll.h>
 #include <pcap.h>
+#include "config.h"
 
 #define SOCKET_DIR "/tmp/netio0"
 #define NETMAP_FILE "/home/kveri/iou_test/NETMAP"
@@ -31,6 +33,7 @@
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
+
 
 struct instances_s {
 	struct iou_s *ious;
@@ -73,12 +76,33 @@ void rebuild_fds(struct instances_s *obj)
 	}
 }
 
+struct sniff_s *create_sniff(int iou_id, int if_major, int if_minor)
+{
+	char *dir = tempnam("/tmp", "iousniff");
+	char file[PATH_MAX];
+	int ret;
+	struct sniff_s *sniff;
+
+	ret = mkdir(dir, 0600);
+	sprintf(file, "%s/%d-%d.%d.pcap", dir, iou_id, if_major, if_minor);
+
+	sniff = (struct sniff_s *)malloc(sizeof(struct sniff_s));
+
+	sniff->if_major = if_major;
+	sniff->if_minor = if_minor;
+	sniff->ph = pcap_open_dead(DLT_RAW, 65535);
+	sniff->pd = pcap_dump_open(sniff->ph, file);
+
+	return sniff;
+}
+
 struct sniff_s *parse_netmap(int iou_id)
 {
 	char id[10], line[4096];
 	FILE *fp;
 	int if_major, if_minor;
 	char *c;
+	struct sniff_s *sniffs = NULL, *sniff, *sniff_ptr;
 
 	printf("parsing for id=%d\n", iou_id);
 
@@ -101,14 +125,24 @@ struct sniff_s *parse_netmap(int iou_id)
 		if_major = (int)strtol(c, &c, 10);
 		c++;
 		if_minor = (int)strtol(c, &c, 10);
+
 		printf("iou: %d\n", iou_id);
 		printf("MAJOR: '%d'\n", if_major);
 		printf("MINOR: '%d'\n", if_minor);
+		sniff = create_sniff(iou_id, if_major, if_minor);
+
+		sniff_ptr = sniffs;
+		while (sniff_ptr && sniff_ptr->next)
+			sniff_ptr = sniff_ptr->next;
+		if (!sniff_ptr)
+			sniffs = sniff;
+		else
+			sniff_ptr->next = sniff;
 	}
 
 	fclose(fp);
 
-	return NULL;
+	return sniffs;
 }
 
 void sniff_init(struct iou_s *iou)
@@ -246,12 +280,14 @@ void handle_incoming(struct instances_s *obj, int index)
 	printf("\n");
 }
 
-int main()
+int main(int argc, char *argv[], char *envp[])
 {
 	struct instances_s obj;
 	int i, ret;
 	
 	init_obj(&obj);
+
+	parse_arguments(argc, argv, envp);
 
 	while (1) {
 		// TODO: every 5 seconds at most
