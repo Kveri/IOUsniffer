@@ -1,9 +1,15 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include "config.h"
 
 #define VERSION "0.1"
+
+#define NETIO_DIR "/tmp/netio0"
+#define NETMAP_FILE "NETMAP"
 
 void display_help(char *name)
 {
@@ -22,19 +28,74 @@ void display_help(char *name)
 	printf("Author: Martin Cechvala\n");
 };
 
-void parse_arguments(int argc, char * argv[], char * envp[])
+int parse_arguments(int argc, char * argv[], char * envp[])
 {
+	struct stat st;
+	int ret;
 	char c;
+
+	config.netio_dir = NULL;
+	config.netmap_file = NULL;
+	config.sniff_dir = NULL;
 
 	while ((c = getopt(argc, argv, "hi:n:s:")) != -1) {
 		switch (c) {
 			case 'h':
 				display_help(argv[0]);
 				exit(0);
-//			case 'i':
-//				config.
+			case 'i':
+				config.netio_dir = (char *)malloc(strlen(optarg) + 1);
+				strcpy(config.netio_dir, optarg);
+				break;
+			case 'n':
+				config.netmap_file = (char *)malloc(strlen(optarg) + 1);
+				strcpy(config.netmap_file, optarg);
+				break;
+			case 's':
+				config.sniff_dir = (char *)malloc(strlen(optarg) + 1);
+				strcpy(config.sniff_dir, optarg);
+				break;
 		}
 	}
-			
 
+	if (!config.netio_dir) {
+		config.netio_dir = (char *)malloc(strlen(NETIO_DIR)+1);
+		strcpy(config.netio_dir, NETIO_DIR);
+	}
+	ret = stat(config.netio_dir, &st);
+	if (ret) {
+		perror("Netio socket dir access error");
+		return -1;
+	}
+	if (!S_ISDIR(st.st_mode)) {
+		fprintf(stderr, "Netio socket path isn't a directory");
+		return -1;
+	}
+
+	if (!config.netmap_file) {
+		config.netmap_file = (char *)malloc(strlen(NETMAP_FILE)+1);
+		strcpy(config.netmap_file, NETMAP_FILE);
+	}
+	ret = stat(config.netmap_file, &st);
+	if (ret) {
+		perror("NETMAP file access error");
+		return -1;
+	}
+	if (!S_ISREG(st.st_mode)) {
+		fprintf(stderr, "NETMAP file isn't a regular file\n");
+		return -1;
+	}
+
+	if (!config.sniff_dir)
+		config.sniff_dir = tempnam("/tmp", "iousniff");
+	ret = mkdir(config.sniff_dir, 0600);
+	if (ret) {
+		ret = stat(config.sniff_dir, &st);
+		if (!S_ISDIR(st.st_mode)) {
+				perror("Sniff path isn't a directory");
+				return -1;
+		}
+	}
+
+	return 0;
 }

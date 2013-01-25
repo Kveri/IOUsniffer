@@ -24,16 +24,15 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <poll.h>
+#include <time.h>
 #include <pcap.h>
 #include "config.h"
-
-#define SOCKET_DIR "/tmp/netio0"
-#define NETMAP_FILE "/home/kveri/iou_test/NETMAP"
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
 
+#define IOUHDR_LEN 8
 
 struct instances_s {
 	struct iou_s *ious;
@@ -63,6 +62,7 @@ void rebuild_fds(struct instances_s *obj)
 {
 	int i = 0;
 	struct iou_s *iou_ptr = obj->ious;
+
 	obj->sockets = (struct pollfd *)realloc(obj->sockets,
 			sizeof(struct pollfd) * (obj->niou));
 	printf("fds realloc: %d\n", obj->niou);
@@ -78,36 +78,41 @@ void rebuild_fds(struct instances_s *obj)
 
 struct sniff_s *create_sniff(int iou_id, int if_major, int if_minor)
 {
-	char *dir = tempnam("/tmp", "iousniff");
 	char file[PATH_MAX];
-	int ret;
 	struct sniff_s *sniff;
 
-	ret = mkdir(dir, 0600);
-	sprintf(file, "%s/%d-%d.%d.pcap", dir, iou_id, if_major, if_minor);
+	sprintf(file, "%s/%d-%d.%d.pcap", config.sniff_dir, iou_id, if_major, if_minor);
 
 	sniff = (struct sniff_s *)malloc(sizeof(struct sniff_s));
 
 	sniff->if_major = if_major;
 	sniff->if_minor = if_minor;
-	sniff->ph = pcap_open_dead(DLT_RAW, 65535);
+	sniff->next = NULL;
+	sniff->ph = pcap_open_dead(DLT_EN10MB, 65535);
 	sniff->pd = pcap_dump_open(sniff->ph, file);
+	if (!sniff->pd) {
+		fprintf(stderr, "pcap error: %s\n", pcap_geterr(sniff->ph));
+		return NULL;
+	}
 
 	return sniff;
 }
 
 struct sniff_s *parse_netmap(int iou_id)
 {
-	char id[10], line[4096];
 	FILE *fp;
-	int if_major, if_minor;
-	char *c;
 	struct sniff_s *sniffs = NULL, *sniff, *sniff_ptr;
+	char id[10], line[4096], *c;
+	int if_major, if_minor, ret;
 
 	printf("parsing for id=%d\n", iou_id);
 
 	sprintf(id, "%d:", iou_id);
-	fp = fopen(NETMAP_FILE, "r");
+	fp = fopen(config.netmap_file, "r");
+	if (!fp) {
+		perror("NETMAP fopen");
+		return NULL;
+	}
 	while (!feof(fp)) {
 		c = fgets(line, sizeof(line), fp);
 		if (!c)
@@ -130,6 +135,8 @@ struct sniff_s *parse_netmap(int iou_id)
 		printf("MAJOR: '%d'\n", if_major);
 		printf("MINOR: '%d'\n", if_minor);
 		sniff = create_sniff(iou_id, if_major, if_minor);
+		if (!sniff)
+			return NULL;
 
 		sniff_ptr = sniffs;
 		while (sniff_ptr && sniff_ptr->next)
@@ -140,19 +147,27 @@ struct sniff_s *parse_netmap(int iou_id)
 			sniff_ptr->next = sniff;
 	}
 
-	fclose(fp);
+	ret = fclose(fp);
+	if (ret != 0) {
+		perror("NETMAP fclose");
+		return NULL;
+	}
 
 	return sniffs;
 }
 
-void sniff_init(struct iou_s *iou)
+int sniff_init(struct iou_s *iou)
 {
 	iou->sniffs = parse_netmap(iou->instance_id);
+	if (!iou->sniffs)
+		return -1;
+	return 0;
 }
 
-void iou_add(struct instances_s *obj, struct iou_s *iou_new)
+int iou_add(struct instances_s *obj, struct iou_s *iou_new)
 {
 	struct iou_s *iou_ptr;
+	int ret;
 
 	iou_new->next = NULL;
 	if (!obj->ious) {
@@ -163,42 +178,67 @@ void iou_add(struct instances_s *obj, struct iou_s *iou_new)
 	while (iou_ptr && iou_ptr->next)
 		iou_ptr = iou_ptr->next;
 	iou_ptr->next = iou_new;
+
 out:
 	obj->niou++;
-	sniff_init(iou_new);
+	ret = sniff_init(iou_new);
+	if (ret == -1)
+		return -1;
+	return 0;
 }
 
 int socket_replace(char *name)
 {
 	struct sockaddr_un sock_addr;
-	int tmp, sock;
 	char path_tmp[PATH_MAX];
+	int tmp, sock, ret;
 
 	sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+	if (sock == -1) {
+		perror("socket failed");
+		return -1;
+	}
+
 	sock_addr.sun_family = AF_UNIX;
-	strcpy(sock_addr.sun_path, SOCKET_DIR);
+	strcpy(sock_addr.sun_path, config.netio_dir);
 	strcat(sock_addr.sun_path, "/");
 	strcat(sock_addr.sun_path, name);
 	tmp = strlen(sock_addr.sun_path) + sizeof(sock_addr.sun_family);
 
 	strcpy(path_tmp, sock_addr.sun_path);
 	strcat(path_tmp, "_real");
-	rename(sock_addr.sun_path, path_tmp);
-	bind(sock, (struct sockaddr *)&sock_addr, tmp);
+	ret = rename(sock_addr.sun_path, path_tmp);
+	if (ret == -1) {
+		perror("rename failed");
+		return -1;
+	}
+	ret = bind(sock, (struct sockaddr *)&sock_addr, tmp);
+	if (ret == -1) {
+		perror("bind failed");
+		return -1;
+	}
 
 	return sock;
 }
 
-void instance_add(struct instances_s *obj, char *name)
+int instance_add(struct instances_s *obj, char *name)
 {
 	struct iou_s *iou_new;
+	int ret;
 
 	iou_new = (struct iou_s *)malloc(sizeof(struct iou_s));
 	iou_new->instance_id = atoi(name);
 	iou_new->sock = socket_replace(name);
+	if (iou_new->sock < 0) {
+		free(iou_new);
+		return iou_new->sock;
+	}
 
-	iou_add(obj, iou_new);
+	ret = iou_add(obj, iou_new);
+	if (ret == -1)
+		return -1;
 	rebuild_fds(obj);
+	return 0;
 }
 
 int check_files(struct instances_s *obj)
@@ -206,9 +246,14 @@ int check_files(struct instances_s *obj)
 	DIR *dir;
 	struct dirent *entry;
 	struct iou_s *iou_ptr;
-	int got_it;
+	int got_it, ret;
 
-	dir = opendir(SOCKET_DIR);
+	dir = opendir(config.netio_dir);
+	if (!dir) {
+		perror("opendir failed");
+		return -1;
+	}
+
 	while ((entry = readdir(dir)) != NULL) {
 		if (entry->d_type != DT_SOCK)
 			continue; // only socket files interest us
@@ -225,10 +270,19 @@ int check_files(struct instances_s *obj)
 			}
 			iou_ptr = iou_ptr->next;
 		}
-		if (got_it != 1)
-			instance_add(obj, entry->d_name);
+		if (got_it != 1) {
+			ret = instance_add(obj, entry->d_name);
+			if (ret != 0) {
+				fprintf(stderr, "instance_add generic error\n");
+				return -1;
+			}
+		}
 	}
-	closedir(dir);
+	ret = closedir(dir);
+	if (ret) {
+		perror("closedir failed");
+		return ret;
+	}
 	return 0;
 }
 
@@ -239,19 +293,76 @@ void init_obj(struct instances_s *obj)
 	obj->niou = 0;
 }
 
+void pcap_write(struct instances_s *obj, int dst, int dst_if1, int dst_if2,
+					int src, int src_if1, int src_if2, char *buf, int len)
+{
+	struct pcap_pkthdr hdr;
+	struct timeval tv;
+	struct iou_s *iou_ptr;
+	struct sniff_s *sniff_ptr;
+	int x, x1, x2;
+
+	printf("writing buffer to pcap\n");
+
+	gettimeofday(&tv, NULL);
+	memcpy(&(hdr.ts), &tv, sizeof(tv));
+	hdr.caplen = len;
+	hdr.len = len;
+
+	iou_ptr = obj->ious;
+	x = -1;
+	printf("looking for src, dst instances\n");
+	while (iou_ptr) {
+		printf("comparing iou_ptr->instance_id=%d to %d or %d\n",
+			iou_ptr->instance_id, dst, src);
+		if (iou_ptr->instance_id == dst) {
+			x = dst;
+			x1 = dst_if1;
+			x2 = dst_if2;
+		}
+		if (iou_ptr->instance_id == src) {
+			x = src;
+			x1 = src_if1;
+			x2 = src_if2;
+		}
+		if (x == -1)
+			goto next;
+
+		printf("found\n");
+		
+		x = -1;
+		sniff_ptr = iou_ptr->sniffs;
+		while (sniff_ptr) {
+			printf("comparing major %d to %d minor %d to %d\n",
+				sniff_ptr->if_major, x1, sniff_ptr->if_minor, x2);
+			if (sniff_ptr->if_major != x1 || sniff_ptr->if_minor != x2)
+				goto next2;
+			printf("found\n");
+
+			printf("WRITING WRITING WRITING\n");
+			pcap_dump((u_char *)sniff_ptr->pd, &hdr, (u_char *)buf);
+
+next2:
+			sniff_ptr = sniff_ptr->next;
+		}
+next:
+		iou_ptr = iou_ptr->next;
+	}
+}
+
 void handle_incoming(struct instances_s *obj, int index)
 {
 	struct sockaddr_un remote, dst;
 	char buf[65536], path[PATH_MAX];
 	unsigned int remote_len, iou_dst, iou_src, iou_src_if1, iou_src_if2;
 	unsigned int iou_dst_if1, iou_dst_if2;
-	int len, i;
+	int len, i, ret;
 
 	remote_len = sizeof(remote);
 	len = recvfrom(obj->sockets[index].fd, &buf, sizeof(buf), 0,
 			(struct sockaddr *)&remote, &remote_len);
 
-	if (len < 8) // invalid packet
+	if (len < IOUHDR_LEN) // invalid packet
 		return;
 
 	// conversion
@@ -263,12 +374,17 @@ void handle_incoming(struct instances_s *obj, int index)
 	iou_src_if2 = (buf[5] & 0xf0) >> 4;
 
 	// build path and send it
-	sprintf(path, "%s/%d_real", SOCKET_DIR, iou_dst);
+	sprintf(path, "%s/%d_real", config.netio_dir, iou_dst);
 
 	dst.sun_family = AF_UNIX;
 	strncpy(dst.sun_path, path, sizeof(dst.sun_path)-1);
-	sendto(obj->sockets[index].fd, buf, len, 0,
+	ret = sendto(obj->sockets[index].fd, buf, len, 0,
 			(struct sockaddr *)&dst, sizeof(dst));
+	if (ret == -1)
+		perror("sendto failed");
+
+	pcap_write(obj, iou_dst, iou_dst_if1, iou_dst_if2, iou_src, iou_src_if1,
+							iou_src_if2, buf+IOUHDR_LEN, len-IOUHDR_LEN);
 
 	// dump it
 	printf("received from [%s] ", remote.sun_path);
@@ -284,14 +400,22 @@ int main(int argc, char *argv[], char *envp[])
 {
 	struct instances_s obj;
 	int i, ret;
+#define CHECK_INTERVAL 5
+	time_t last_time = time(NULL) - CHECK_INTERVAL - 1;
 	
 	init_obj(&obj);
 
-	parse_arguments(argc, argv, envp);
+	ret = parse_arguments(argc, argv, envp);
+	if (ret)
+		return ret;
 
 	while (1) {
-		// TODO: every 5 seconds at most
-		check_files(&obj);
+		if (last_time + CHECK_INTERVAL <= time(NULL)) {
+			ret = check_files(&obj);
+			if (ret)
+				return ret;
+			last_time = time(NULL);
+		}
 
 		ret = poll(obj.sockets, obj.niou, -1);
 		if (ret <= 0)
