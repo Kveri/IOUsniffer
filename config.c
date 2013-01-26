@@ -88,7 +88,7 @@ int parse_arguments(int argc, char * argv[], char * envp[])
 
 	if (!config.sniff_dir)
 		config.sniff_dir = tempnam("/tmp", "iousniff");
-	ret = mkdir(config.sniff_dir, 0600);
+	ret = mkdir(config.sniff_dir, 0644);
 	if (ret) {
 		ret = stat(config.sniff_dir, &st);
 		if (!S_ISDIR(st.st_mode)) {

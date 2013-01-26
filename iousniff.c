@@ -25,6 +25,7 @@
 #include <dirent.h>
 #include <poll.h>
 #include <time.h>
+#include <signal.h>
 #include <pcap.h>
 #include "config.h"
 
@@ -33,6 +34,8 @@
 #endif
 
 #define IOUHDR_LEN 8
+
+int SIGNAL_END = 0;
 
 struct instances_s {
 	struct iou_s *ious;
@@ -43,6 +46,7 @@ struct instances_s {
 struct sniff_s {
 	int if_major;
 	int if_minor;
+	int if_dlt; // data link type (http://www.tcpdump.org/linktypes.html)
 	
 	pcap_t *ph;
 	pcap_dumper_t *pd;
@@ -76,7 +80,7 @@ void rebuild_fds(struct instances_s *obj)
 	}
 }
 
-struct sniff_s *create_sniff(int iou_id, int if_major, int if_minor)
+struct sniff_s *create_sniff(int iou_id, int if_major, int if_minor, int if_dlt)
 {
 	char file[PATH_MAX];
 	struct sniff_s *sniff;
@@ -87,8 +91,9 @@ struct sniff_s *create_sniff(int iou_id, int if_major, int if_minor)
 
 	sniff->if_major = if_major;
 	sniff->if_minor = if_minor;
+	sniff->if_dlt = if_dlt;
 	sniff->next = NULL;
-	sniff->ph = pcap_open_dead(DLT_EN10MB, 65535);
+	sniff->ph = pcap_open_dead(if_dlt, 65535);
 	sniff->pd = pcap_dump_open(sniff->ph, file);
 	if (!sniff->pd) {
 		fprintf(stderr, "pcap error: %s\n", pcap_geterr(sniff->ph));
@@ -98,12 +103,119 @@ struct sniff_s *create_sniff(int iou_id, int if_major, int if_minor)
 	return sniff;
 }
 
+void create_assign_sniff(struct sniff_s **sniffs, int iou_id, int if_major,
+						int if_minor, int if_dlt)
+{
+	struct sniff_s *sniff, *sniff_ptr;
+
+	printf("iou: %d\n", iou_id);
+	printf("MAJOR: '%d'\n", if_major);
+	printf("MINOR: '%d'\n", if_minor);
+	sniff = create_sniff(iou_id, if_major, if_minor, if_dlt);
+	if (!sniff)
+		return;
+
+	if (!*sniffs) {
+		*sniffs = sniff;
+	} else {
+		sniff_ptr = *sniffs;
+		while (sniff_ptr && sniff_ptr->next)
+			sniff_ptr = sniff_ptr->next;
+		sniff_ptr->next = sniff;
+	}
+}
+
+int parse_half_line(char **cp, int iou_id, int *if_major, int *if_minor)
+{
+	char *c = *cp;
+	int x, if1, if2;
+	// 100:0/0@test1 101:0/1@test1 1
+	// 100:0/0@test1 101:0/1@test1 104
+	// 100:0/0@test1 101:0/1@test1
+	x = (int)strtol(c, &c, 10);
+	if (x != iou_id) // not our iou_id
+		return 1;
+	if (*c != ':') // invalid line
+		return 2;
+	c++;
+	if1 = (int)strtol(c, &c, 10);
+	if (*c != '/')
+		return 2;
+	c++;
+	if2 = (int)strtol(c, &c, 10);
+	if (*c != '@')
+		return 2;
+
+
+	*if_major = if1;
+	*if_minor = if2;
+	*cp = c;
+	return 0;
+}
+
+int parse_dlt(char **cp)
+{
+	char *c = *cp;
+	int x;
+
+	x = (int)strtol(c, &c, 10);
+	if (x < 0 || x > 255)
+		return -1;
+	return x;
+}
+
+void parse_one_line(char *line, int iou_id, struct sniff_s **sniffs)
+{
+	char *c = line;
+	int if_major1, if_minor1, if_major2, if_minor2, if_dlt, ret1, ret2;
+	// 100:0/0@test1 101:0/1@test1 1
+	// 100:0/0@test1 101:0/1@test1 104
+	// 100:0/0@test1 101:0/1@test1
+	ret1 = parse_half_line(&c, iou_id, &if_major1, &if_minor1);
+	if (ret1 == 2)
+		return; // invalid line
+
+	// find first space (or an end)
+	c = strpbrk(c, " \t\r\n");
+	if (!c || *c == '\r' || *c == '\n')
+		return; // invalid line (premature end of line)
+	// eat spaces
+	while (*c == ' ' || *c == '\t')
+		c++;
+
+	ret2 = parse_half_line(&c, iou_id, &if_major2, &if_minor2);
+	if (ret2 == 2)
+		return; // invalid line
+
+	// find first space (or an end) 
+	c = strpbrk(c, " \t\r\n");
+	if (!c || *c == '\r' || *c == '\n') { // found end
+		if_dlt = 1; // assume DLT == ETHERNET
+	} else { // DLT may be present
+		// eat spaces
+		while (*c == ' ' || *c == '\t')
+			c++;
+
+		if_dlt = parse_dlt(&c);
+		if (if_dlt == -1) // invalid DLT, assume ethernet
+			if_dlt = 1;
+	}
+	
+
+	if (ret1 == 0)
+		create_assign_sniff(sniffs, iou_id, if_major1, if_minor1,
+									if_dlt);
+	if (ret2 == 0)
+		create_assign_sniff(sniffs, iou_id, if_major2, if_minor2,
+									if_dlt);
+}
+
 struct sniff_s *parse_netmap(int iou_id)
 {
 	FILE *fp;
-	struct sniff_s *sniffs = NULL, *sniff, *sniff_ptr;
 	char id[10], line[4096], *c;
-	int if_major, if_minor, ret;
+	struct sniff_s *sniffs = NULL;
+	int ret;
 
 	printf("parsing for id=%d\n", iou_id);
 
@@ -117,34 +229,8 @@ struct sniff_s *parse_netmap(int iou_id)
 		c = fgets(line, sizeof(line), fp);
 		if (!c)
 			break;
-		c = strstr(line, id);
-		if (!c)
-			continue;
-		
-		// c should be at line beggining or after ' ' (space)
-		if (c != line && c[-1] != ' ' && c[-1] != '\t')
-			continue;
 
-		c += strlen(id);
-
-		if_major = (int)strtol(c, &c, 10);
-		c++;
-		if_minor = (int)strtol(c, &c, 10);
-
-		printf("iou: %d\n", iou_id);
-		printf("MAJOR: '%d'\n", if_major);
-		printf("MINOR: '%d'\n", if_minor);
-		sniff = create_sniff(iou_id, if_major, if_minor);
-		if (!sniff)
-			return NULL;
-
-		sniff_ptr = sniffs;
-		while (sniff_ptr && sniff_ptr->next)
-			sniff_ptr = sniff_ptr->next;
-		if (!sniff_ptr)
-			sniffs = sniff;
-		else
-			sniff_ptr->next = sniff;
+		parse_one_line(line, iou_id, &sniffs);
 	}
 
 	ret = fclose(fp);
@@ -156,18 +242,9 @@ struct sniff_s *parse_netmap(int iou_id)
 	return sniffs;
 }
 
-int sniff_init(struct iou_s *iou)
-{
-	iou->sniffs = parse_netmap(iou->instance_id);
-	if (!iou->sniffs)
-		return -1;
-	return 0;
-}
-
 int iou_add(struct instances_s *obj, struct iou_s *iou_new)
 {
 	struct iou_s *iou_ptr;
-	int ret;
 
 	iou_new->next = NULL;
 	if (!obj->ious) {
@@ -181,8 +258,8 @@ int iou_add(struct instances_s *obj, struct iou_s *iou_new)
 
 out:
 	obj->niou++;
-	ret = sniff_init(iou_new);
-	if (ret == -1)
+	iou_new->sniffs = parse_netmap(iou_new->instance_id);
+	if (!iou_new->sniffs)
 		return -1;
 	return 0;
 }
@@ -391,9 +468,51 @@ void handle_incoming(struct instances_s *obj, int index)
 	printf("%d:%d/%d -> %d:%d/%d:\n", iou_src, iou_src_if1,
 			iou_src_if2, iou_dst, iou_dst_if1, iou_dst_if2);
 	for (i = 0; i < len; i++) {
-		printf("%02X ", buf[i] & 0xff);
+		printf("\\x%02x", buf[i] & 0xff);
 	}
 	printf("\n");
+}
+
+void signal_handler(int signum)
+{
+	SIGNAL_END = 1;
+}
+
+void end_process(struct instances_s *obj)
+{
+	struct iou_s *iou_ptr, *iou_ptr2;
+	struct sniff_s *sniff_ptr, *sniff_ptr2;
+	char path[PATH_MAX], path2[PATH_MAX];
+
+	if (obj->ious) {
+		iou_ptr = obj->ious;
+		while (iou_ptr) {
+			close(iou_ptr->sock);
+			sprintf(path, "%s/%d", config.netio_dir, iou_ptr->instance_id);
+			strcpy(path2, path);
+			strcat(path2, "_real");
+			rename(path2, path);
+
+			sniff_ptr = iou_ptr->sniffs;
+			while (sniff_ptr) {
+				pcap_dump_close(sniff_ptr->pd);
+				pcap_close(sniff_ptr->ph);
+				sniff_ptr2 = sniff_ptr->next;
+				free(sniff_ptr);
+				sniff_ptr = sniff_ptr2;
+			}
+			iou_ptr2 = iou_ptr->next;
+			free(iou_ptr);
+			iou_ptr = iou_ptr2;
+		}
+	}
+
+	free(obj->sockets);
+	free(config.netio_dir);
+	free(config.netmap_file);
+	free(config.sniff_dir);
+
+	exit(0);
 }
 
 int main(int argc, char *argv[], char *envp[])
@@ -405,11 +524,18 @@ int main(int argc, char *argv[], char *envp[])
 	
 	init_obj(&obj);
 
+	signal(SIGINT, signal_handler);
+	signal(SIGTERM, signal_handler);
+	signal(SIGHUP, signal_handler);
+
 	ret = parse_arguments(argc, argv, envp);
 	if (ret)
 		return ret;
 
 	while (1) {
+		if (SIGNAL_END)
+			end_process(&obj);
+
 		if (last_time + CHECK_INTERVAL <= time(NULL)) {
 			ret = check_files(&obj);
 			if (ret)
@@ -417,7 +543,7 @@ int main(int argc, char *argv[], char *envp[])
 			last_time = time(NULL);
 		}
 
-		ret = poll(obj.sockets, obj.niou, -1);
+		ret = poll(obj.sockets, obj.niou, 1000*CHECK_INTERVAL);
 		if (ret <= 0)
 			continue;
 
