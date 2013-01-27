@@ -7,6 +7,8 @@ struct config_s {
 	char *netio_dir;
 	char *netmap_file;
 	char *sniff_dir;
+	int debug_level;
+	int flush_at_write;
 };
 
 int parse_arguments(int argc, char * argv[], char * envp[]);

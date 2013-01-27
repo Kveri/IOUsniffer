@@ -6,7 +6,7 @@
 #include <unistd.h>
 #include "config.h"
 
-#define VERSION "0.1"
+#define VERSION "0.2"
 
 #define NETIO_DIR "/tmp/netio0"
 #define NETMAP_FILE "NETMAP"
@@ -14,15 +14,17 @@
 void display_help(char *name)
 {
 	printf("Usage: %s [-h] [-i <netio_dir>] [-n <NETMAP>] ", name);
-	printf("[-s <sniff_dir>]\n");
+	printf("[-s <sniff_dir>] [-f] [-d [-d ...]]\n");
 	puts("");
 	puts("Arguments:");
 	printf("\t-h: displays this help\n");
 	printf("\t-i <netio_dir>: Look for netio sockets in <netio_dir>\n");
-	printf("\t\t[default=/tmp/netioXXX] where XXX is current effective UID\n");
+	printf("\t\t\t[default=/tmp/netio0]\n");
 	printf("\t-n <NETMAP>: Location of <NETMAP> file [default=./NETMAP]\n");
 	printf("\t-s <sniff_dir>: Directory to place sniffs to ");
 	printf("[default=/tmp/iousn*]\n");
+	printf("\t-f: Flush at every write to pcap\n");
+	printf("\t-d: Increase debug level (may be specified more than once)\n");
 	puts("");
 	printf("Version: %s\n", VERSION);
 	printf("Author: Martin Cechvala\n");
@@ -37,8 +39,10 @@ int parse_arguments(int argc, char * argv[], char * envp[])
 	config.netio_dir = NULL;
 	config.netmap_file = NULL;
 	config.sniff_dir = NULL;
+	config.flush_at_write = 0;
+	config.debug_level = 0;
 
-	while ((c = getopt(argc, argv, "hi:n:s:")) != -1) {
+	while ((c = getopt(argc, argv, "hi:n:s:df")) != -1) {
 		switch (c) {
 			case 'h':
 				display_help(argv[0]);
@@ -54,6 +58,12 @@ int parse_arguments(int argc, char * argv[], char * envp[])
 			case 's':
 				config.sniff_dir = (char *)malloc(strlen(optarg) + 1);
 				strcpy(config.sniff_dir, optarg);
+				break;
+			case 'f':
+				config.flush_at_write = 1;
+				break;
+			case 'd':
+				config.debug_level++;
 				break;
 		}
 	}

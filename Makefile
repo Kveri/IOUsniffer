@@ -1,4 +1,4 @@
-SRCS=iousniff.c config.c
+SRCS=iousniff.c config.c misc.c
 OBJS=$(SRCS:.c=.o)
 EXE=iousniff
 CC=gcc

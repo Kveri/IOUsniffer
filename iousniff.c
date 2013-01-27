@@ -19,6 +19,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <arpa/inet.h>
@@ -27,7 +28,9 @@
 #include <time.h>
 #include <signal.h>
 #include <pcap.h>
+
 #include "config.h"
+#include "misc.h"
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -69,10 +72,8 @@ void rebuild_fds(struct instances_s *obj)
 
 	obj->sockets = (struct pollfd *)realloc(obj->sockets,
 			sizeof(struct pollfd) * (obj->niou));
-	printf("fds realloc: %d\n", obj->niou);
 
 	while (iou_ptr) {
-		printf("adding socket %d to index %d\n", iou_ptr->sock, i);
 		obj->sockets[i].fd = iou_ptr->sock;
 		obj->sockets[i].events = POLLIN;
 		iou_ptr = iou_ptr->next;
@@ -85,7 +86,8 @@ struct sniff_s *create_sniff(int iou_id, int if_major, int if_minor, int if_dlt)
 	char file[PATH_MAX];
 	struct sniff_s *sniff;
 
-	sprintf(file, "%s/%d-%d.%d.pcap", config.sniff_dir, iou_id, if_major, if_minor);
+	sprintf(file, "%s/%d-%d.%d-%ld.pcap", config.sniff_dir, iou_id,
+												if_major, if_minor, time(NULL));
 
 	sniff = (struct sniff_s *)malloc(sizeof(struct sniff_s));
 
@@ -108,9 +110,6 @@ void create_assign_sniff(struct sniff_s **sniffs, int iou_id, int if_major,
 {
 	struct sniff_s *sniff, *sniff_ptr;
 
-	printf("iou: %d\n", iou_id);
-	printf("MAJOR: '%d'\n", if_major);
-	printf("MINOR: '%d'\n", if_minor);
 	sniff = create_sniff(iou_id, if_major, if_minor, if_dlt);
 	if (!sniff)
 		return;
@@ -217,8 +216,6 @@ struct sniff_s *parse_netmap(int iou_id)
 	struct sniff_s *sniffs = NULL;
 	int ret;
 
-	printf("parsing for id=%d\n", iou_id);
-
 	sprintf(id, "%d:", iou_id);
 	fp = fopen(config.netmap_file, "r");
 	if (!fp) {
@@ -298,6 +295,71 @@ int socket_replace(char *name)
 	return sock;
 }
 
+void iou_free(struct iou_s *iou_ptr)
+{
+	char path[PATH_MAX], path_real[PATH_MAX], path_lock[PATH_MAX];
+	struct sniff_s *sniff_ptr, *sniff_ptr2;
+	int fd;
+	struct flock lock;
+
+	debug(0, "Freeing IOU %d\n", iou_ptr->instance_id);
+
+	close(iou_ptr->sock);
+	sprintf(path, "%s/%d", config.netio_dir, iou_ptr->instance_id);
+	strcpy(path_real, path);
+	strcat(path_real, "_real");
+	// first try to remove socket base socket
+	if (unlink(path)) {
+		// if it fails it means IOU has finished
+		// so we cleanup and remove real socket completely
+		unlink(path_real);
+	} else {
+		// if it exists IOU should be running
+		// but thanks to poor practices in wrapper-linux
+		// which kills IOU with SIGKILL, socket could exists
+		// without IOU actually running
+
+		// first we try to open lockfile, if we fail IOU is 100% down
+		// because its lockfile has been removed and we can safely
+		// remove real socket
+		strcpy(path_lock, path);
+		strcat(path_lock, ".lck");
+		fd = open(path_lock, O_WRONLY);
+		if (fd < 0) {
+			unlink(path_real);
+		} else {
+			// IOU was improperly shutted down or it's running
+			// now we try to obtain a WR lock just like IOU does
+			lock.l_type = F_WRLCK;
+			lock.l_whence = SEEK_END;
+			lock.l_start = 0;
+			lock.l_len = 0;
+			lock.l_pid = 0;
+			fcntl(fd, F_GETLK, &lock); // fcntl always returns 0
+			close(fd);
+			if (lock.l_type == F_UNLCK) {
+				// lockfile isn't locked means IOU isn't running
+				unlink(path_real);
+				unlink(path_lock);
+			} else {
+				// lockfile is locked, so IOU is running
+				rename(path_real, path);
+			}
+		}
+	}
+
+	sniff_ptr = iou_ptr->sniffs;
+	while (sniff_ptr) {
+		pcap_dump_close(sniff_ptr->pd);
+		pcap_close(sniff_ptr->ph);
+		sniff_ptr2 = sniff_ptr->next;
+		free(sniff_ptr);
+		sniff_ptr = sniff_ptr2;
+	}
+
+	free(iou_ptr);
+}
+
 int instance_add(struct instances_s *obj, char *name)
 {
 	struct iou_s *iou_new;
@@ -314,8 +376,31 @@ int instance_add(struct instances_s *obj, char *name)
 	ret = iou_add(obj, iou_new);
 	if (ret == -1)
 		return -1;
-	rebuild_fds(obj);
+	debug(0, "Registered IOU %s\n", name);
 	return 0;
+}
+
+struct iou_s *instance_remove(struct instances_s *obj, int iou_id)
+{
+	struct iou_s *iou_ptr = obj->ious, *iou_prev;
+
+	while (iou_ptr) {
+		if (iou_ptr->instance_id != iou_id) {
+			iou_prev = iou_ptr;
+			iou_ptr = iou_ptr->next;
+			continue;
+		}
+
+		if (iou_ptr == obj->ious) {
+			obj->ious = iou_ptr->next;
+			iou_prev = NULL;
+		} else {
+			iou_prev->next = iou_ptr->next;
+		}
+		iou_free(iou_ptr);
+		break;
+	}
+	return iou_prev ? iou_prev->next : obj->ious;
 }
 
 int check_files(struct instances_s *obj)
@@ -323,7 +408,9 @@ int check_files(struct instances_s *obj)
 	DIR *dir;
 	struct dirent *entry;
 	struct iou_s *iou_ptr;
-	int got_it, ret;
+	char path[PATH_MAX];
+	int got_it, ret, need_refresh = 0;
+	struct stat st;
 
 	dir = opendir(config.netio_dir);
 	if (!dir) {
@@ -349,7 +436,9 @@ int check_files(struct instances_s *obj)
 		}
 		if (got_it != 1) {
 			ret = instance_add(obj, entry->d_name);
-			if (ret != 0) {
+			if (ret == 0) {
+				need_refresh = 1;
+			} else {
 				fprintf(stderr, "instance_add generic error\n");
 				return -1;
 			}
@@ -359,6 +448,27 @@ int check_files(struct instances_s *obj)
 	if (ret) {
 		perror("closedir failed");
 		return ret;
+	}
+
+	// check our sockets if they still exist
+	// if not, IOU instance has finished and we need to remove our socket
+	iou_ptr = obj->ious;
+	while (iou_ptr) {
+		sprintf(path, "%s/%d", config.netio_dir, iou_ptr->instance_id);
+		ret = stat(path, &st);
+		if (ret == 0) {
+			iou_ptr = iou_ptr->next;
+			continue;
+		}
+		debug(0, "Socket for IOU %d gone, removing instance\n",
+													iou_ptr->instance_id);
+		iou_ptr = instance_remove(obj, iou_ptr->instance_id);
+		debug(0, "Instance removed\n");
+		need_refresh = 1;
+	}
+	if (need_refresh) {
+		debug(1, "Refreshing poll sockets\n");
+		rebuild_fds(obj);
 	}
 	return 0;
 }
@@ -379,8 +489,6 @@ void pcap_write(struct instances_s *obj, int dst, int dst_if1, int dst_if2,
 	struct sniff_s *sniff_ptr;
 	int x, x1, x2;
 
-	printf("writing buffer to pcap\n");
-
 	gettimeofday(&tv, NULL);
 	memcpy(&(hdr.ts), &tv, sizeof(tv));
 	hdr.caplen = len;
@@ -388,10 +496,7 @@ void pcap_write(struct instances_s *obj, int dst, int dst_if1, int dst_if2,
 
 	iou_ptr = obj->ious;
 	x = -1;
-	printf("looking for src, dst instances\n");
 	while (iou_ptr) {
-		printf("comparing iou_ptr->instance_id=%d to %d or %d\n",
-			iou_ptr->instance_id, dst, src);
 		if (iou_ptr->instance_id == dst) {
 			x = dst;
 			x1 = dst_if1;
@@ -405,19 +510,15 @@ void pcap_write(struct instances_s *obj, int dst, int dst_if1, int dst_if2,
 		if (x == -1)
 			goto next;
 
-		printf("found\n");
-		
 		x = -1;
 		sniff_ptr = iou_ptr->sniffs;
 		while (sniff_ptr) {
-			printf("comparing major %d to %d minor %d to %d\n",
-				sniff_ptr->if_major, x1, sniff_ptr->if_minor, x2);
 			if (sniff_ptr->if_major != x1 || sniff_ptr->if_minor != x2)
 				goto next2;
-			printf("found\n");
 
-			printf("WRITING WRITING WRITING\n");
 			pcap_dump((u_char *)sniff_ptr->pd, &hdr, (u_char *)buf);
+			if (config.flush_at_write == 1)
+				pcap_dump_flush(sniff_ptr->pd);
 
 next2:
 			sniff_ptr = sniff_ptr->next;
@@ -433,7 +534,7 @@ void handle_incoming(struct instances_s *obj, int index)
 	char buf[65536], path[PATH_MAX];
 	unsigned int remote_len, iou_dst, iou_src, iou_src_if1, iou_src_if2;
 	unsigned int iou_dst_if1, iou_dst_if2;
-	int len, i, ret;
+	int len, ret;
 
 	remote_len = sizeof(remote);
 	len = recvfrom(obj->sockets[index].fd, &buf, sizeof(buf), 0,
@@ -457,52 +558,42 @@ void handle_incoming(struct instances_s *obj, int index)
 	strncpy(dst.sun_path, path, sizeof(dst.sun_path)-1);
 	ret = sendto(obj->sockets[index].fd, buf, len, 0,
 			(struct sockaddr *)&dst, sizeof(dst));
-	if (ret == -1)
+	if (ret == -1) {
 		perror("sendto failed");
+		// close this instance
+		debug(0, "Can't write to socket %d, removing instance\n", iou_dst);
+		instance_remove(obj, iou_dst);
+		rebuild_fds(obj);
+
+		return;
+	}
 
 	pcap_write(obj, iou_dst, iou_dst_if1, iou_dst_if2, iou_src, iou_src_if1,
 							iou_src_if2, buf+IOUHDR_LEN, len-IOUHDR_LEN);
 
 	// dump it
-	printf("received from [%s] ", remote.sun_path);
-	printf("%d:%d/%d -> %d:%d/%d:\n", iou_src, iou_src_if1,
-			iou_src_if2, iou_dst, iou_dst_if1, iou_dst_if2);
-	for (i = 0; i < len; i++) {
-		printf("\\x%02x", buf[i] & 0xff);
-	}
-	printf("\n");
+	debug(2, "%d:%d/%d -> %d:%d/%d len=%d\n", iou_src, iou_src_if1,
+			iou_src_if2, iou_dst, iou_dst_if1, iou_dst_if2, len-IOUHDR_LEN);
+
+	if (config.debug_level >= 3)
+		dump_packet(buf+IOUHDR_LEN, len-IOUHDR_LEN);
 }
 
 void signal_handler(int signum)
 {
+	debug(0, "Cleaning up...\n");
 	SIGNAL_END = 1;
 }
 
 void end_process(struct instances_s *obj)
 {
 	struct iou_s *iou_ptr, *iou_ptr2;
-	struct sniff_s *sniff_ptr, *sniff_ptr2;
-	char path[PATH_MAX], path2[PATH_MAX];
 
 	if (obj->ious) {
 		iou_ptr = obj->ious;
 		while (iou_ptr) {
-			close(iou_ptr->sock);
-			sprintf(path, "%s/%d", config.netio_dir, iou_ptr->instance_id);
-			strcpy(path2, path);
-			strcat(path2, "_real");
-			rename(path2, path);
-
-			sniff_ptr = iou_ptr->sniffs;
-			while (sniff_ptr) {
-				pcap_dump_close(sniff_ptr->pd);
-				pcap_close(sniff_ptr->ph);
-				sniff_ptr2 = sniff_ptr->next;
-				free(sniff_ptr);
-				sniff_ptr = sniff_ptr2;
-			}
 			iou_ptr2 = iou_ptr->next;
-			free(iou_ptr);
+			iou_free(iou_ptr);
 			iou_ptr = iou_ptr2;
 		}
 	}
@@ -531,6 +622,13 @@ int main(int argc, char *argv[], char *envp[])
 	ret = parse_arguments(argc, argv, envp);
 	if (ret)
 		return ret;
+
+	printf("NETMAP: %s\n", config.netmap_file);
+	printf("Netio directory: %s\n", config.netio_dir);
+	printf("Sniffing to: %s\n", config.sniff_dir);
+	printf("Flush at write: %s\n", (config.flush_at_write ? "yes" : "no"));
+	printf("Debug level: %d\n", config.debug_level);
+	printf("--------\n");
 
 	while (1) {
 		if (SIGNAL_END)
