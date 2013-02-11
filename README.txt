@@ -67,6 +67,13 @@ Example NETMAP:
 100:1/2@test1 101:1/2@test1 107
 100:1/3@test1 102:1/3@test1
 
+"test1" is the hostname of local machine, but it will work even without "@hostname"
+for example:
+100:0/0 101:0/0 1
+100:1/0 101:1/0 9
+100:1/1 101:1/1 104
+100:1/2 101:1/2 107
+100:1/3  102:1/3
 
 == FEATURES ==
 - automatically detecting launch of new IOU, adding it's socket to handle list
