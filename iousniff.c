@@ -142,9 +142,8 @@ int parse_half_line(char **cp, int iou_id, int *if_major, int *if_minor)
 		return 2;
 	c++;
 	if2 = (int)strtol(c, &c, 10);
-	if (*c != '@')
+	if (*c != '@' && *c != ' ' && *c != '\t')
 		return 2;
-
 
 	*if_major = if1;
 	*if_minor = if2;
@@ -227,6 +226,7 @@ struct sniff_s *parse_netmap(int iou_id)
 		if (!c)
 			break;
 
+		debug(2, "parser read line: %s", line);
 		parse_one_line(line, iou_id, &sniffs);
 	}
 
