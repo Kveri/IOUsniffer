@@ -91,3 +91,6 @@ for example:
 	connection between already running IOU and other IOU, IOUsniffer won't
 	notice this new link (that means it won't start sniffing on it) until
 	you restart process of that running IOU.
+
+== TODO ==
+- make it work when user specifies other than point-to-point connection in NETMAP (3+ instances on one line)
