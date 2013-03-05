@@ -19,7 +19,7 @@ Every IOU, when starts, create a socket with IOU ID (instance ID) in
 On the other way, sending is done differently. Mappings between IOU instances
 are defined by NETMAP file in a well-known format. These mappings tell IOU to
 which socket file it should write when it want to send data to other IOU. This
-data sending is dont directly using sendto() to appropriate socket file.
+data sending is done directly using sendto() to appropriate socket file.
 
 Our tool does the following:
  1. looks for socket files in /tmp/netio dir (changable at startup)
@@ -32,7 +32,7 @@ flow.
 
 == ENCAPSULATION ==
 PCAP tools need to know encapsulation (layer 2 protocol, DLT, LLT, ...) when
-displaying dumps. because there is no way how to distinguish for example
+displaying dumps. Because there is no way how to distinguish for example
 Ethernet from HLDC just by looking at raw data (other than higher layer logic
 and megabytes of code), this DLT (Datalink Type) is stored inside PCAP file
 in PCAP header.
