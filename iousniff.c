@@ -170,20 +170,26 @@ void parse_one_line(char *line, int iou_id, struct sniff_s **sniffs)
 	// 100:0/0@test1 101:0/1@test1 104
 	// 100:0/0@test1 101:0/1@test1
 	ret1 = parse_half_line(&c, iou_id, &if_major1, &if_minor1);
-	if (ret1 == 2)
+	if (ret1 == 2) {
+		debug(0, "invalid line\n");
 		return; // invalid line
+	}
 
 	// find first space (or an end)
 	c = strpbrk(c, " \t\r\n");
-	if (!c || *c == '\r' || *c == '\n')
+	if (!c || *c == '\r' || *c == '\n') {
+		debug(0, "invalid line (premature end of line)\n");
 		return; // invalid line (premature end of line)
+	}
 	// eat spaces
 	while (*c == ' ' || *c == '\t')
 		c++;
 
 	ret2 = parse_half_line(&c, iou_id, &if_major2, &if_minor2);
-	if (ret2 == 2)
+	if (ret2 == 2) {
+		debug(0, "invalid line 2\n");
 		return; // invalid line
+	}
 
 	// find first space (or an end) 
 	c = strpbrk(c, " \t\r\n");
@@ -199,6 +205,7 @@ void parse_one_line(char *line, int iou_id, struct sniff_s **sniffs)
 			if_dlt = 1;
 	}
 	
+	debug(5, "before create_assign_sniff (%d, %d)\n", ret1, ret2);
 
 	if (ret1 == 0)
 		create_assign_sniff(sniffs, iou_id, if_major1, if_minor1,
@@ -236,6 +243,7 @@ struct sniff_s *parse_netmap(int iou_id)
 		return NULL;
 	}
 
+	debug(4, "sniffs = %p\n", sniffs);
 	return sniffs;
 }
 
@@ -256,7 +264,7 @@ int iou_add(struct instances_s *obj, struct iou_s *iou_new)
 out:
 	obj->niou++;
 	iou_new->sniffs = parse_netmap(iou_new->instance_id);
-	if (!iou_new->sniffs)
+	if (!iou_new->sniffs) // we haven't found this iou instance in NETMAP
 		return -1;
 	return 0;
 }
@@ -365,6 +373,8 @@ int instance_add(struct instances_s *obj, char *name)
 	struct iou_s *iou_new;
 	int ret;
 
+	debug(4, "instance_add(%p, %s)\n", obj, name);
+
 	iou_new = (struct iou_s *)malloc(sizeof(struct iou_s));
 	iou_new->instance_id = atoi(name);
 	iou_new->sock = socket_replace(name);
@@ -374,8 +384,11 @@ int instance_add(struct instances_s *obj, char *name)
 	}
 
 	ret = iou_add(obj, iou_new);
-	if (ret == -1)
+	if (ret == -1) {
+		debug(0, "NOT Registered IOU %s (not found in NETMAP)\n", name);
 		return -1;
+	}
+
 	debug(0, "Registered IOU %s\n", name);
 	return 0;
 }
@@ -438,9 +451,6 @@ int check_files(struct instances_s *obj)
 			ret = instance_add(obj, entry->d_name);
 			if (ret == 0) {
 				need_refresh = 1;
-			} else {
-				fprintf(stderr, "instance_add generic error\n");
-				return -1;
 			}
 		}
 	}
