@@ -47,8 +47,12 @@ struct instances_s {
 };
 
 struct sniff_s {
-	int if_major;
-	int if_minor;
+	int iou_id1;
+	int iou_id2;
+	int if_major1;
+	int if_minor1;
+	int if_major2;
+	int if_minor2;
 	int if_dlt; // data link type (http://www.tcpdump.org/linktypes.html)
 	
 	pcap_t *ph;
@@ -61,6 +65,7 @@ struct iou_s {
 	int instance_id;
 	int sock;
 	struct sniff_s *sniffs;
+	int nsniff;
 	
 	struct iou_s *next;
 };
@@ -81,152 +86,256 @@ void rebuild_fds(struct instances_s *obj)
 	}
 }
 
-struct sniff_s *create_sniff(int iou_id, int if_major, int if_minor, int if_dlt)
+void delete_sniff(struct iou_s *iou, int iou_id1, int if_major1, int if_minor1, int iou_id2, int if_major2, int if_minor2)
+{
+	struct sniff_s *sniff_ptr;
+	struct sniff_s *sniff_before;
+	
+	if(iou->nsniff == 0) // no sniffer attached to the IOU
+		return;
+	
+	if(iou->nsniff == 1) // only one sniffer attached to the IOU
+	{
+		sniff_ptr = iou->sniffs;
+		
+		if(sniff_ptr->iou_id1 == iou_id1 && sniff_ptr->iou_id2 == iou_id2 && sniff_ptr->if_major1 == if_major1 && sniff_ptr->if_major2 == if_major2 && sniff_ptr->if_minor1 == if_minor1 && sniff_ptr->if_minor2 == if_minor2)
+		{
+			debug(1,"Link to supress : %d:%d/%d %d:%d/%d\n",iou_id1,if_major1,if_minor1,iou_id2,if_major2,if_minor2);
+			pcap_dump_close(sniff_ptr->pd);
+			pcap_close(sniff_ptr->ph);
+			
+			free(sniff_ptr);
+			iou->sniffs = NULL;
+			
+			iou->nsniff--;
+			return;
+		}
+	}
+	else if(iou->nsniff > 1) // more than one sniffer attached the IOU
+	{
+		sniff_ptr = iou->sniffs->next;
+		sniff_before = iou->sniffs;
+		
+		while(sniff_ptr)
+		{
+			if(sniff_ptr->iou_id1 == iou_id1 && sniff_ptr->iou_id2 == iou_id2 && sniff_ptr->if_major1 == if_major1 && sniff_ptr->if_major2 == if_major2 && sniff_ptr->if_minor1 == if_minor1 && sniff_ptr->if_minor2 == if_minor2)
+			{
+				debug(1,"Link to supress : %d:%d/%d %d:%d/%d\n",iou_id1,if_major1,if_minor1,iou_id2,if_major2,if_minor2);
+				
+				pcap_dump_close(sniff_ptr->pd);
+				pcap_close(sniff_ptr->ph);
+				
+				if(sniff_ptr->next != NULL)
+				{
+					sniff_before->next = sniff_ptr->next;
+				}
+				else
+				{
+					sniff_before->next = NULL;
+				}
+				free(sniff_ptr);
+				
+				iou->nsniff--;
+				return;
+			}
+			sniff_ptr = sniff_ptr->next;
+			sniff_before = sniff_ptr;
+		}
+	}
+}
+
+void create_sniff(struct iou_s *iou, int iou_id1, int if_major1, int if_minor1, int iou_id2, int if_major2, int if_minor2, int if_dlt)
 {
 	char file[PATH_MAX];
-	struct sniff_s *sniff;
 
-	sprintf(file, "%s/%d-%d.%d-%ld.pcap", config.sniff_dir, iou_id,
-												if_major, if_minor, time(NULL));
+	struct sniff_s *sniff_ptr;
+	struct sniff_s *sniff_new;
+	int sniff_link = 0;
+	
+	sniff_ptr = iou->sniffs;
 
-	sniff = (struct sniff_s *)malloc(sizeof(struct sniff_s));
+	while(sniff_ptr) //check if we have alreay a sniffer for the link
+	{
+		if(sniff_ptr->iou_id1 == iou_id1 && sniff_ptr->iou_id2 == iou_id2 && sniff_ptr->if_major1 == if_major1 && sniff_ptr->if_major2 == if_major2 && sniff_ptr->if_minor1 == if_minor1 && sniff_ptr->if_minor2 == if_minor2)
+		{
+			debug(2,"Sniffer for link between %d:%d/%d and %d:%d/%d alreay found\n", iou_id1, if_major1, if_minor1, iou_id2, if_major2, if_minor2);
+			sniff_link++;
+			break;
+		}
+		sniff_ptr = sniff_ptr->next;
+	}
+	
+	if(sniff_link == 0) // if no sniffer found
+	{
+		debug(0,"creating sniffer for link between %d:%d/%d and %d:%d/%d\n", iou_id1, if_major1, if_minor1, iou_id2, if_major2, if_minor2);
+		sprintf(file, "%s/%d_%d.%d-%d_%d.%d-%ld.pcap", config.sniff_dir, iou_id1, if_major1, if_minor1,iou_id2, if_major2, if_minor2, time(NULL));
 
-	sniff->if_major = if_major;
-	sniff->if_minor = if_minor;
-	sniff->if_dlt = if_dlt;
-	sniff->next = NULL;
-	sniff->ph = pcap_open_dead(if_dlt, 65535);
-	sniff->pd = pcap_dump_open(sniff->ph, file);
-	if (!sniff->pd) {
-		fprintf(stderr, "pcap error: %s\n", pcap_geterr(sniff->ph));
-		return NULL;
+		sniff_new = (struct sniff_s *)malloc(sizeof(struct sniff_s));
+
+		sniff_new->iou_id1 = iou_id1;
+		sniff_new->if_major1 = if_major1;
+		sniff_new->if_minor1 = if_minor1;
+		sniff_new->iou_id2 = iou_id2;
+		sniff_new->if_major2 = if_major2;
+		sniff_new->if_minor2 = if_minor2;
+		sniff_new->if_dlt = if_dlt;
+		sniff_new->next = NULL;
+		sniff_new->ph = pcap_open_dead(if_dlt, 65535);
+		sniff_new->pd = pcap_dump_open(sniff_new->ph, file);
+		if (!sniff_new->pd) {
+			printf("pcap error: %s\n", pcap_geterr(sniff_new->ph));
+		}
+
+		//assign the sniffer to the list
+		if (!iou->sniffs) {
+			iou->sniffs = sniff_new;
+		}
+		else {
+			sniff_ptr = iou->sniffs;
+			while (sniff_ptr && sniff_ptr->next)
+				sniff_ptr = sniff_ptr->next;
+			sniff_ptr->next = sniff_new;
+		}
+		iou->nsniff++;
 	}
 
-	return sniff;
 }
 
-void create_assign_sniff(struct sniff_s **sniffs, int iou_id, int if_major,
-						int if_minor, int if_dlt)
-{
-	struct sniff_s *sniff, *sniff_ptr;
-
-	sniff = create_sniff(iou_id, if_major, if_minor, if_dlt);
-	if (!sniff)
-		return;
-
-	if (!*sniffs) {
-		*sniffs = sniff;
-	} else {
-		sniff_ptr = *sniffs;
-		while (sniff_ptr && sniff_ptr->next)
-			sniff_ptr = sniff_ptr->next;
-		sniff_ptr->next = sniff;
-	}
-}
-
-int parse_half_line(char **cp, int iou_id, int *if_major, int *if_minor)
+struct iou_s *parse_half_line(char **cp,int check_device, struct instances_s *obj, int *iou_id1, int *if_major, int *if_minor)
 {
 	char *c = *cp;
 	int x, if1, if2;
-	// 100:0/0@test1 101:0/1@test1 1
-	// 100:0/0@test1 101:0/1@test1 104
+	int iou_in_obj = 0;
+	struct iou_s *iou_ptr = obj->ious;
+	
+	// 100:0/0@test1 101:0/1@test1 #1
+	// 100:0/0@test1 101:0/1@test1 #104
 	// 100:0/0@test1 101:0/1@test1
-	x = (int)strtol(c, &c, 10);
-	if (x != iou_id) // not our iou_id
-		return 1;
+	
+	x = (int)strtol(c, &c, 10); //parse the first IOU ID
+
+	while(iou_ptr) //check if the IOU ID is in the list of registered IOU
+	{
+		if(iou_ptr->instance_id == x)
+		{
+			iou_in_obj++;
+			break;
+		}
+		iou_ptr = iou_ptr->next;
+	}
+	if(iou_in_obj == 0 && check_device == 1) // if not found in the list of registered IOU
+		return NULL;
+
 	if (*c != ':') // invalid line
-		return 2;
+		return NULL;
 	c++;
+	
 	if1 = (int)strtol(c, &c, 10);
 	if (*c != '/')
-		return 2;
+		return NULL;
 	c++;
-	if2 = (int)strtol(c, &c, 10);
-	if (*c != '@' && *c != ' ' && *c != '\t')
-		return 2;
 
+	if2 = (int)strtol(c, &c, 10);
+
+
+	*iou_id1 = x;
 	*if_major = if1;
 	*if_minor = if2;
 	*cp = c;
-	return 0;
+	return iou_ptr;
 }
 
-int parse_dlt(char **cp)
+void parse_dlt(char **cp, int *if_dlt)
 {
 	char *c = *cp;
-	int x;
-
-	x = (int)strtol(c, &c, 10);
-	if (x < 0 || x > 255)
-		return -1;
-	return x;
+	*if_dlt = (int)strtol(c, &c, 10);
 }
 
-void parse_one_line(char *line, int iou_id, struct sniff_s **sniffs)
+void parse_one_line(char *line, struct instances_s *obj)
 {
 	char *c = line;
-	int if_major1, if_minor1, if_major2, if_minor2, if_dlt, ret1, ret2;
-	// 100:0/0@test1 101:0/1@test1 1
-	// 100:0/0@test1 101:0/1@test1 104
+	int iou_id1, iou_id2, if_major1, if_minor1, if_major2, if_minor2, if_dlt;
+	struct iou_s *ret1, *ret2;
+	// 100:0/0@test1 101:0/1@test1 #1
+	// 100:0/0@test1 101:0/1@test1 #104
 	// 100:0/0@test1 101:0/1@test1
-	ret1 = parse_half_line(&c, iou_id, &if_major1, &if_minor1);
-	if (ret1 == 2) {
-		debug(0, "invalid line\n");
-		return; // invalid line
-	}
+	
+	if(need_capture_line(line)) //if we found a specific DLT
+	{
+		ret1 = parse_half_line(&c, 1, obj, &iou_id1, &if_major1, &if_minor1); //check for the existence of the IOU
 
-	// find first space (or an end)
-	c = strpbrk(c, " \t\r\n");
-	if (!c || *c == '\r' || *c == '\n') {
-		debug(0, "invalid line (premature end of line)\n");
-		return; // invalid line (premature end of line)
-	}
-	// eat spaces
-	while (*c == ' ' || *c == '\t')
-		c++;
+		if (ret1 == NULL) {
+			debug(0, "invalid line or IOU ID not found in registered IOU\n");
+			return; // invalid line or IOU not found in the registered IOU
+		}
 
-	ret2 = parse_half_line(&c, iou_id, &if_major2, &if_minor2);
-	if (ret2 == 2) {
-		debug(0, "invalid line 2\n");
-		return; // invalid line
-	}
-
-	// find first space (or an end) 
-	c = strpbrk(c, " \t\r\n");
-	if (!c || *c == '\r' || *c == '\n') { // found end
-		if_dlt = 1; // assume DLT == ETHERNET
-	} else { // DLT may be present
+		// find first space (or an end)
+		c = strpbrk(c, " \t\r\n");
+		if (!c || *c == '\r' || *c == '\n') {
+			debug(0, "invalid line (premature end of line)\n");
+			return; // invalid line (premature end of line)
+		}
 		// eat spaces
 		while (*c == ' ' || *c == '\t')
 			c++;
 
-		if_dlt = parse_dlt(&c);
-		if (if_dlt == -1) // invalid DLT, assume ethernet
-			if_dlt = 1;
-	}
-	
-	debug(5, "before create_assign_sniff (%d, %d)\n", ret1, ret2);
+		ret2 = parse_half_line(&c, 0, obj, &iou_id2, &if_major2, &if_minor2); //don't check for the existence of the IOU
 
-	if (ret1 == 0)
-		create_assign_sniff(sniffs, iou_id, if_major1, if_minor1,
-									if_dlt);
-	if (ret2 == 0)
-		create_assign_sniff(sniffs, iou_id, if_major2, if_minor2,
-									if_dlt);
+		// find first space (or an end) 
+		c = strpbrk(c, " \t\r\n");
+		if (!c || *c == '\r' || *c == '\n') { // found end
+			debug(0, "no DLT found (premature end of line)\n");
+			return;
+		}
+		c++;
+		
+		if(!c || *c != '#') {
+			debug(2, "no DLT found (wrong format '#DTL')\n");
+			return;
+		}
+		c++;
+		
+		parse_dlt(&c, &if_dlt);
+
+		if (ret1) // create a sniffer structure only if the first IOU in the NETMAP line is registered
+			create_sniff(ret1, iou_id1, if_major1, if_minor1, iou_id2, if_major2, if_minor2, if_dlt);
+	}
+	else // if DLT not found we may have to delete a sniffer
+	{
+		ret1 = parse_half_line(&c, 1, obj, &iou_id1, &if_major1, &if_minor1); //check for the existence of the IOU
+
+		if (ret1 == NULL) {
+			debug(1, "invalid line or IOU ID not found in registered IOU\n");
+			return; // invalid line
+		}
+
+		// find first space (or an end)
+		c = strpbrk(c, " \t\r\n");
+		if (!c || *c == '\r' || *c == '\n') {
+			debug(0, "invalid line (premature end of line)\n");
+			return; // invalid line (premature end of line)
+		}
+		// eat spaces
+		while (*c == ' ' || *c == '\t')
+			c++;
+
+		ret2 = parse_half_line(&c, 0, obj, &iou_id2, &if_major2, &if_minor2); //don't check for the existence of the IOU
+		
+		if(ret1)
+			delete_sniff(ret1, iou_id1, if_major1, if_minor1, iou_id2, if_major2, if_minor2);
+	}
 }
 
-struct sniff_s *parse_netmap(int iou_id)
+void parse_netmap(struct instances_s *obj)
 {
 	FILE *fp;
 	char id[10], line[4096], *c;
-	struct sniff_s *sniffs = NULL;
 	int ret;
 
-	sprintf(id, "%d:", iou_id);
 	fp = fopen(config.netmap_file, "r");
 	if (!fp) {
 		perror("NETMAP fopen");
-		return NULL;
+		return;
 	}
 	while (!feof(fp)) {
 		c = fgets(line, sizeof(line), fp);
@@ -234,17 +343,14 @@ struct sniff_s *parse_netmap(int iou_id)
 			break;
 
 		debug(2, "parser read line: %s", line);
-		parse_one_line(line, iou_id, &sniffs);
+		parse_one_line(line, obj);
 	}
 
 	ret = fclose(fp);
 	if (ret != 0) {
 		perror("NETMAP fclose");
-		return NULL;
+		return;
 	}
-
-	debug(4, "sniffs = %p\n", sniffs);
-	return sniffs;
 }
 
 int iou_add(struct instances_s *obj, struct iou_s *iou_new)
@@ -263,9 +369,7 @@ int iou_add(struct instances_s *obj, struct iou_s *iou_new)
 
 out:
 	obj->niou++;
-	iou_new->sniffs = parse_netmap(iou_new->instance_id);
-	if (!iou_new->sniffs) // we haven't found this iou instance in NETMAP
-		return -1;
+
 	return 0;
 }
 
@@ -378,6 +482,9 @@ int instance_add(struct instances_s *obj, char *name)
 	iou_new = (struct iou_s *)malloc(sizeof(struct iou_s));
 	iou_new->instance_id = atoi(name);
 	iou_new->sock = socket_replace(name);
+	iou_new->sniffs = NULL;
+	iou_new->nsniff = 0;
+	
 	if (iou_new->sock < 0) {
 		free(iou_new);
 		return iou_new->sock;
@@ -422,7 +529,7 @@ int check_files(struct instances_s *obj)
 	struct dirent *entry;
 	struct iou_s *iou_ptr;
 	char path[PATH_MAX];
-	int got_it, ret, need_refresh = 0;
+	int got_it, ret, name, need_refresh = 0;
 	struct stat st;
 
 	dir = opendir(config.netio_dir);
@@ -436,7 +543,13 @@ int check_files(struct instances_s *obj)
 			continue; // only socket files interest us
 		if (strstr(entry->d_name, "_real") != NULL)
 			continue; // ignore real sockets
-
+			
+		name = atoi(entry->d_name); //check the ID of the socket
+		if (name == 0 || name > 1000) { // if > 1000 don't register (ioulive86)
+			debug(2, "skipping ioulive id : %d\n", name);
+			continue;
+		}
+		
 		iou_ptr = obj->ious;
 		got_it = 0;
 		while (iou_ptr) {
@@ -459,7 +572,11 @@ int check_files(struct instances_s *obj)
 		perror("closedir failed");
 		return ret;
 	}
-
+	
+	// parse the netmap file checking for link to capture or stop capturing
+	// only line with 2 connections and a pattern #dlt at the end of the line are captured
+	parse_netmap(obj);
+	
 	// check our sockets if they still exist
 	// if not, IOU instance has finished and we need to remove our socket
 	iou_ptr = obj->ious;
@@ -506,6 +623,7 @@ void pcap_write(struct instances_s *obj, int dst, int dst_if1, int dst_if2,
 
 	iou_ptr = obj->ious;
 	x = -1;
+	debug(3,"PCAP : src --> %d , dst --> %d\n", src, dst);
 	while (iou_ptr) {
 		if (iou_ptr->instance_id == dst) {
 			x = dst;
@@ -517,13 +635,15 @@ void pcap_write(struct instances_s *obj, int dst, int dst_if1, int dst_if2,
 			x1 = src_if1;
 			x2 = src_if2;
 		}
-		if (x == -1)
+		if (x == -1) {
+			debug(3,"PCAP not found\n");
+		}
 			goto next;
 
 		x = -1;
 		sniff_ptr = iou_ptr->sniffs;
 		while (sniff_ptr) {
-			if (sniff_ptr->if_major != x1 || sniff_ptr->if_minor != x2)
+			if (sniff_ptr->if_major1 != x1 || sniff_ptr->if_minor1 != x2)
 				goto next2;
 
 			pcap_dump((u_char *)sniff_ptr->pd, &hdr, (u_char *)buf);
