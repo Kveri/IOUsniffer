@@ -211,8 +211,8 @@ void parse_one_line(char *line, int iou_id, struct sniff_s **sniffs)
 	if (!c || *c == '\r' || *c == '\n') { // found end
 		if_dlt = 1; // assume DLT == ETHERNET
 	} else { // DLT may be present
-		// eat spaces
-		while (*c == ' ' || *c == '\t')
+		// eat spaces and #
+		while (*c == ' ' || *c == '\t' || *c == '#')
 			c++;
 
 		// parse DLT
