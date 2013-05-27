@@ -529,6 +529,13 @@ int check_files(struct instances_s *obj)
 		if (strstr(entry->d_name, "_real") != NULL)
 			continue; // ignore real sockets
 
+		// skip IOUlive
+		ret = strtol(entry->d_name, NULL, 10);
+		if (ret == 0 || ret > 1000) {
+			debug(2, "Skipping IOUlive ID: %d\n", ret);
+			continue;
+		}
+
 		iou_ptr = obj->ious;
 		got_it = 0;
 		// find current socket file in our instance list
