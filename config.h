@@ -9,6 +9,7 @@ struct config_s {
 	char *sniff_dir;
 	int debug_level;
 	int flush_at_write;
+	int sniff_dlt_only;
 };
 
 int parse_arguments(int argc, char * argv[], char * envp[]);

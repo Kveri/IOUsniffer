@@ -209,7 +209,9 @@ void parse_one_line(char *line, int iou_id, struct sniff_s **sniffs)
 	// find first space (or an end) 
 	c = strpbrk(c, " \t\r\n");
 	if (!c || *c == '\r' || *c == '\n') { // found end
-		if_dlt = 1; // assume DLT == ETHERNET
+		// assume ethernet if we're sniffing on all links
+		// disable sniffing if we're sniffing only on links with DLT specified
+		if_dlt = config.sniff_dlt_only == 1 ? -1 : 0;
 	} else { // DLT may be present
 		// eat spaces and #
 		while (*c == ' ' || *c == '\t' || *c == '#')
@@ -220,6 +222,11 @@ void parse_one_line(char *line, int iou_id, struct sniff_s **sniffs)
 		if (if_dlt == -1) // invalid DLT, assume ethernet
 			if_dlt = 1;
 		// else if_dlt is set correctly
+	}
+
+	if (if_dlt == -1) {
+		debug(5, "disabling sniffing because DLT is not specified and -o is\n");
+		return;
 	}
 	
 	debug(5, "before create_assign_sniff (%d, %d)\n", ret1, ret2);
@@ -757,6 +764,8 @@ int main(int argc, char *argv[], char *envp[])
 	printf("NETMAP: %s\n", config.netmap_file);
 	printf("Netio directory: %s\n", config.netio_dir);
 	printf("Sniffing to: %s\n", config.sniff_dir);
+	printf("Sniffing only with DLT specified: %s\n",
+										(config.sniff_dlt_only ? "yes" : "no"));
 	printf("Flush at write: %s\n", (config.flush_at_write ? "yes" : "no"));
 	printf("Debug level: %d\n", config.debug_level);
 	printf("--------\n");
