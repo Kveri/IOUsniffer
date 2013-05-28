@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <regex.h>
 
 #include "misc.h"
 #include "config.h"
@@ -44,4 +45,53 @@ void dump_packet(char *buf, int len)
 		pkt_n += 16;
 	}
 	putchar('\n');
+}
+
+int need_capture_line(char *str_request)
+{
+	int err;
+	regex_t preg;
+	const char *str_regex = "^[0-9][0-9]*:[0-9]+/[0-9]+.*[0-9][0-9]*:[0-9]+/[0-9]+.*#[0-9]+[\r\n]";
+	// 100:0/0@test1 101:0/1@test1 #1 --> MATCH
+	// 100:0/0@test1 101:0/1@test1 #104 --> MATCH
+	// 100:0/0@test1 101:0/1@test1 --> NOMATCH
+
+	err = regcomp (&preg, str_regex, REG_NOSUB | REG_EXTENDED);
+	if (err == 0)
+	{
+		int match;
+		match = regexec (&preg, str_request, 0, NULL, 0);
+		regfree (&preg);
+
+		if (match == 0)
+		{
+			debug(1, "%s must be captured (DLT found)\n", str_request);
+			return 1;
+		}
+		else if (match == REG_NOMATCH)
+		{
+			return 0;
+		}
+	}
+	else
+	{
+		char *text;
+		size_t size;
+
+		size = regerror (err, &preg, NULL, 0);
+		text = malloc (sizeof (*text) * size);
+		
+		if (text)
+		{
+			regerror (err, &preg, text, size);
+			fprintf (stderr, "Error : %s\n", text);
+			free (text);
+		}
+		else
+		{
+			fprintf (stderr, "Not enough Memory\n");
+			return -1;
+		}
+	}
+	return -1;
 }
